@@ -1,133 +1,63 @@
-import numpy as np
-
-import matplotlib.pyplot as plt
-
+import os
 from stock_prediction import create_model, load_data
-from parameters import *
+from parameters import *  # Import parameters and configurations from the 'parameters.py' file
 
+# Create necessary directories if they do not exist
+for directory in ["results", "logs", "data"]:
+    if not os.path.isdir(directory):
+        os.mkdir(directory)  # Create directory if it does not exist
 
-def plot_graph(test_df):
-    """
-    This function plots true close price along with predicted close price
-    with blue and red colors respectively
-    """
-    plt.plot(test_df[f'true_adjclose_{LOOKUP_STEP}'], c='b')
-    plt.plot(test_df[f'adjclose_{LOOKUP_STEP}'], c='r')
-    plt.xlabel("Days")
-    plt.ylabel("Price")
-    plt.legend(["Actual Price", "Predicted Price"])
-    plt.show()
+# Load data using the parameters from 'parameters.py'
+data = load_data(
+    ticker,                # Stock ticker symbol (e.g., "AMZN")
+    N_STEPS,               # Number of time steps for the model input
+    scale=SCALE,           # Whether to scale feature columns and output price
+    split_by_date=SPLIT_BY_DATE,  # Whether to split the dataset by date
+    shuffle=SHUFFLE,      # Whether to shuffle the dataset
+    lookup_step=LOOKUP_STEP,      # Number of steps into the future to predict
+    test_size=TEST_SIZE,  # Proportion of the dataset to be used for testing
+    feature_columns=FEATURE_COLUMNS  # List of feature columns to be used
+)
 
+# Save the dataframe to a CSV file
+data["df"].to_csv(ticker_data_filename)  # Save the dataframe for later use
 
-def get_final_df(model, data):
-    """
-    This function takes the `model` and `data` dict to
-    construct a final dataframe that includes the features along
-    with true and predicted prices of the testing dataset
-    """
-    # if predicted future price is higher than the current,
-    # then calculate the true future price minus the current price, to get the buy profit
-    buy_profit  = lambda current, pred_future, true_future: true_future - current if pred_future > current else 0
-    # if the predicted future price is lower than the current price,
-    # then subtract the true future price from the current price
-    sell_profit = lambda current, pred_future, true_future: current - true_future if pred_future < current else 0
-    X_test = data["X_test"]
-    y_test = data["y_test"]
-    # perform prediction and get prices
-    y_pred = model.predict(X_test)
-    if SCALE:
-        y_test = np.squeeze(data["column_scaler"]["adjclose"].inverse_transform(np.expand_dims(y_test, axis=0)))
-        y_pred = np.squeeze(data["column_scaler"]["adjclose"].inverse_transform(y_pred))
-    test_df = data["test_df"]
-    # add predicted future prices to the dataframe
-    test_df[f"adjclose_{LOOKUP_STEP}"] = y_pred
-    # add true future prices to the dataframe
-    test_df[f"true_adjclose_{LOOKUP_STEP}"] = y_test
-    # sort the dataframe by date
-    test_df.sort_index(inplace=True)
-    final_df = test_df
-    # add the buy profit column
-    final_df["buy_profit"] = list(map(buy_profit,
-                                    final_df["adjclose"],
-                                    final_df[f"adjclose_{LOOKUP_STEP}"],
-                                    final_df[f"true_adjclose_{LOOKUP_STEP}"])
-                                    # since we don't have profit for last sequence, add 0's
-                                    )
-    # add the sell profit column
-    final_df["sell_profit"] = list(map(sell_profit,
-                                    final_df["adjclose"],
-                                    final_df[f"adjclose_{LOOKUP_STEP}"],
-                                    final_df[f"true_adjclose_{LOOKUP_STEP}"])
-                                    # since we don't have profit for last sequence, add 0's
-                                    )
-    return final_df
+# Create the model using specified parameters
+model = create_model(
+    N_STEPS,               # Number of time steps for the model input
+    len(FEATURE_COLUMNS),  # Number of features in the dataset
+    loss=LOSS,             # Loss function to be used (e.g., "mae" or "huber_loss")
+    units=UNITS,           # Number of units (neurons) in each LSTM layer
+    cell=CELL,             # Type of LSTM cell (e.g., LSTM)
+    n_layers=N_LAYERS,     # Number of LSTM layers
+    dropout=DROPOUT,       # Dropout rate to prevent overfitting
+    optimizer=OPTIMIZER,   # Optimizer to be used (e.g., "adam")
+    bidirectional=BIDIRECTIONAL  # Whether to use Bidirectional LSTM layers
+)
 
+# Set up callbacks for model training
+from tensorflow.keras.callbacks import ModelCheckpoint, TensorBoard
 
-def predict(model, data):
-    # retrieve the last sequence from data
-    last_sequence = data["last_sequence"][-N_STEPS:]
-    # expand dimension
-    last_sequence = np.expand_dims(last_sequence, axis=0)
-    # get the prediction (scaled from 0 to 1)
-    prediction = model.predict(last_sequence)
-    # get the price (by inverting the scaling)
-    if SCALE:
-        predicted_price = data["column_scaler"]["adjclose"].inverse_transform(prediction)[0][0]
-    else:
-        predicted_price = prediction[0][0]
-    return predicted_price
+# ModelCheckpoint callback to save model weights during training
+checkpointer = ModelCheckpoint(
+    os.path.join("results", f"{model_name}.h5"),  # Path where model weights will be saved
+    save_weights_only=True,                       # Save only the model weights
+    save_best_only=True,                          # Save only the best model weights based on validation loss
+    verbose=1                                     # Print progress messages
+)
 
+# TensorBoard callback for visualizing training process
+tensorboard = TensorBoard(
+    log_dir=os.path.join("logs", model_name)     # Directory where TensorBoard logs will be saved
+)
 
-# load the data
-data = load_data(ticker, N_STEPS, scale=SCALE, split_by_date=SPLIT_BY_DATE,
-                shuffle=SHUFFLE, lookup_step=LOOKUP_STEP, test_size=TEST_SIZE,
-                feature_columns=FEATURE_COLUMNS)
-
-# construct the model
-model = create_model(N_STEPS, len(FEATURE_COLUMNS), loss=LOSS, units=UNITS, cell=CELL, n_layers=N_LAYERS,
-                    dropout=DROPOUT, optimizer=OPTIMIZER, bidirectional=BIDIRECTIONAL)
-
-
-# load optimal model weights from results folder
-model_path = os.path.join("results", "2021-05-31_AMZN-sh-1-sc-1-sbd-0-huber_loss-adam-LSTM-seq-50-step-15-layers-2-units-256") + ".h5"
-model.load_weights(model_path)
-
-# evaluate the model
-loss, mae = model.evaluate(data["X_test"], data["y_test"], verbose=0)
-# calculate the mean absolute error (inverse scaling)
-if SCALE:
-    mean_absolute_error = data["column_scaler"]["adjclose"].inverse_transform([[mae]])[0][0]
-else:
-    mean_absolute_error = mae
-
-# get the final dataframe for the testing set
-final_df = get_final_df(model, data)
-# predict the future price
-future_price = predict(model, data)
-# we calculate the accuracy by counting the number of positive profits
-accuracy_score = (len(final_df[final_df['sell_profit'] > 0]) + len(final_df[final_df['buy_profit'] > 0])) / len(final_df)
-# calculating total buy & sell profit
-total_buy_profit  = final_df["buy_profit"].sum()
-total_sell_profit = final_df["sell_profit"].sum()
-# total profit by adding sell & buy together
-total_profit = total_buy_profit + total_sell_profit
-# dividing total profit by number of testing samples (number of trades)
-profit_per_trade = total_profit / len(final_df)
-# printing metrics
-print(f"Future price after {LOOKUP_STEP} days is {future_price:.2f}$")
-print(f"{LOSS} loss:", loss)
-print("Mean Absolute Error:", mean_absolute_error)
-print("Accuracy score:", accuracy_score)
-print("Total buy profit:", total_buy_profit)
-print("Total sell profit:", total_sell_profit)
-print("Total profit:", total_profit)
-print("Profit per trade:", profit_per_trade)
-# plot true/pred prices graph
-plot_graph(final_df)
-print(final_df.tail(10))
-# save the final dataframe to csv-results folder
-csv_results_folder = "csv-results"
-if not os.path.isdir(csv_results_folder):
-    os.mkdir(csv_results_folder)
-csv_filename = os.path.join(csv_results_folder, model_name + ".csv")
-final_df.to_csv(csv_filename)
+# Train the model
+history = model.fit(
+    data["X_train"],          # Training features
+    data["y_train"],          # Training labels
+    batch_size=BATCH_SIZE,    # Batch size for training
+    epochs=EPOCHS,            # Number of epochs to train the model
+    validation_data=(data["X_test"], data["y_test"]),  # Validation data for evaluation during training
+    callbacks=[checkpointer, tensorboard],  # List of callbacks to use during training
+    verbose=1                 # Print progress messages
+)
