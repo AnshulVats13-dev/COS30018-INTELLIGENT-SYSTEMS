@@ -9,6 +9,7 @@ from sklearn.model_selection import train_test_split
 from yahoo_fin import stock_info as si
 from collections import deque
 import matplotlib.pyplot as plt
+import mplfinance as mpf  #importing mpfinance library for candlestick chart
 
 # Configuration parameters
 N_STEPS = 50                # Number of historical steps to use for prediction
@@ -190,6 +191,72 @@ def create_model(sequence_length, n_features, units=256, cell=LSTM, n_layers=2, 
     model.compile(loss=loss, metrics=["mean_absolute_error"], optimizer=optimizer)  # Compile the model
     return model
 
+
+#function created to plot candlestick chart while also specifying the type of the chart
+# with the title over the x and y-axis
+def plot_candlestick_chart(df, n_days=1):   
+    # plotting a candlestick chart with specified number of trading days wehere defaukt numbmer is set to 1
+    df_resampled = df.resample(f'{n_days}D').agg({
+        'open':"first",         #first price of the period
+        "high":"max",           #highest price
+        "low":"min",             #lowest price
+        "adjclose": "last",     #last price
+        "volume": "sum"         #total volume 
+
+    })
+
+     # Rename columns to match mplfinance requirements
+    df_resampled.rename(columns={
+        'open': 'Open',
+        'high': 'High',
+        'low': 'Low',
+        'adjclose': 'Close',
+        'volume': 'Volume'
+    }, inplace=True)
+
+    #this will drop the rows with missing values after resampling
+    df_resampled.dropna(inplace=True)
+
+    #plot the resampled data
+    mpf.plot(df_resampled, type="candle", style="charles", title="Candlestick cahrt", ylabel="Price") 
+
+def plot_boxplot_chart(df, n_days=1):
+    # Ensure the index is a DateTime index
+    if not isinstance(df.index, pd.DatetimeIndex):
+        df.index = pd.to_datetime(df.index)
+    
+    # Resample data by n_days and calculate min, 25%, 50%, 75%, and max values
+    df_resampled = df.resample(f"{n_days}D").agg({
+        'adjclose': ['min', '25%', '50%', '75%', 'max']  # Calculate summary statistics
+    })
+    
+    # Drop any rows with NaN values to clean the data
+    df_resampled.dropna(inplace=True)
+
+    print("Resampled Data for Boxplot:")
+    print(df_resampled.head())
+
+    # Prepare data for the boxplot
+    boxplot_data = [
+        df_resampled[('adjclose', 'min')].values,
+        df_resampled[('adjclose', '25%')].values,
+        df_resampled[('adjclose', '50%')].values,
+        df_resampled[('adjclose', '75%')].values,
+        df_resampled[('adjclose', 'max')].values
+    ] 
+
+    print("Boxplot Data:")
+    print(boxplot_data)
+    
+    # Plot the boxplot for the resampled data
+    plt.figure(figsize=(12, 6))  # Set the figure size
+    plt.boxplot(boxplot_data, labels=[f'{n_days} Days'])  # Create the boxplot
+    plt.title(f'Boxplot Chart ({n_days} Days per Boxplot)')  # Set plot title
+    plt.ylabel('Adjusted Close Price')  # Set y-axis label
+    plt.xlabel('Time')  # Set x-axis label
+    plt.savefig('boxplot_chart.png')
+    plt.close() 
+
 def plot_graph(test_df):
     """
     Plot the true vs. predicted prices.
@@ -264,8 +331,16 @@ def new_version():
     """
     Test the new model version by training and evaluating it.
     """
+    n_days = 1
+
     # Load and prepare the data
     data = load_data(ticker, n_steps=N_STEPS, scale=SCALE, shuffle=SHUFFLE, lookup_step=LOOKUP_STEP, split_by_date=SPLIT_BY_DATE, test_size=TEST_SIZE, feature_columns=FEATURE_COLUMNS)
+
+    #plotting candlestick chart for the loaded chart
+    plot_candlestick_chart(data['df'], n_days= n_days)
+
+    #plotting boxplot chart for the loaded chart
+    plot_boxplot_chart(data['df'], n_days = n_days)
     
     # Create and compile the model
     model = create_model(sequence_length=N_STEPS, n_features=len(FEATURE_COLUMNS), units=UNITS, cell=CELL, n_layers=N_LAYERS, dropout=DROPOUT, loss=LOSS, optimizer=OPTIMIZER, bidirectional=BIDIRECTIONAL)
