@@ -175,6 +175,41 @@ def create_model(sequence_length, n_features, units=256, cell=LSTM, n_layers=2, 
     model.compile(loss=loss, metrics=["mean_absolute_error"], optimizer=optimizer)  # Compile the model
     return model
 
+#Funtion to predict multiple future prices (multistep prediction)
+
+def get_multistep_predictions(model, last_sequence, steps, scaler):
+    """
+    Predicts multiple future prices based on the last known sequence.
+    
+    Args:
+        model: Trained LSTM model.
+        last_sequence: The last sequence of input features.
+        steps: Number of future steps to predict.
+        scaler: Scaler to inverse transform predictions.
+        
+    Returns:
+        predictions: A list of predicted future prices.
+    """
+    predictions = []   #list to store predicted future prices
+    current_sequence = last_sequence   #this means it starts with the last known sequence
+
+    #loop through the number of steps to predict
+
+    for _ in range(steps):
+        #predict the nexr price
+        prediction = model.predict(current_sequence[np.newaxis, ...])[0,0]
+        predictions.append(prediction)
+
+        #update the current sequence by appending the new prediction
+        #it also removes the oldest entry and then append the new prediction
+        new_data = np.array(current_sequence[0][-N_STEPS + 1:] + [prediction])
+        current_sequence = np.vstack([current_sequence, new_data])[-N_STEPS:]   #it keeps the last N_STEPS
+
+        #Inverse transform the predictions to original scale
+        predictions = scaler.inverse_transform(np.array(predictions).reshape(-1,1)).flatten()
+        print(f"Multistep predictions: {predictions}")  
+        return predictions   #returns the list of predictions
+
 # Function to plot a candlestick chart
 def plot_candlestick_chart(df, n_days=1):
     df_resampled = df.resample(f'{n_days}D').agg({
@@ -250,8 +285,22 @@ def main():
         scores = model.evaluate(data["X_test"], data["y_test"], verbose=1)
         print(f"Model Evaluation Scores: {scores}")
 
-        # Predict and plot results
-        pred_df = get_final_df(data['test_df'], data["column_scaler"]['adjclose'])
+        #making multistep predictions
+        last_sequence = data['last_sequence']
+        multistep_predictions = get_multistep_predictions(model, last_sequence, steps=LOOKUP_STEP, scaler=data["column_scaler"]["adjclose"])
+        
+
+        # Print confirmation of multistep predictions execution
+        print(f"Successfully executed multistep prediction for {LOOKUP_STEP} steps.")
+        print(f"Multistep predictions for the next {LOOKUP_STEP} days: {multistep_predictions}")
+
+
+        #prepare the final dataframe for plotting
+        pred_df = get_final_df(data['test_df'], data["column_scaler"]["adjclose"])
+        pred_df["multistep_predictions"] = np.nan
+        pred_df["multistep_predictions"].iloc[-len(mutltistep_predictions):] = multistep_predictions
+
+        #plotting the results
         plot_graph(pred_df)
 
         # Optional: Plot candlestick and boxplot charts
