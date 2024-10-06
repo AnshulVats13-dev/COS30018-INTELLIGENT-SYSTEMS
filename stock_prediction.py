@@ -10,6 +10,9 @@ from yahoo_fin import stock_info as si
 from collections import deque
 import matplotlib.pyplot as plt
 import mplfinance as mpf
+from statsmodels.tsa.arima.model import ARIMA 
+from sklearn.metrics import mean_absolute_error
+
 
 # Configuration parameters
 N_STEPS = 50  # Number of time steps in each sequence
@@ -35,6 +38,11 @@ OPTIMIZER = "adam"  # Optimizer used for training
 BATCH_SIZE = 64  # Batch size for training
 EPOCHS = 500  # Number of epochs for training
 
+ARIMA_ORDER = (1,1,1) #P,D,Q ORDER FOR ARIMA
+
+ENSEMBLE_WEIGHTS = {'ARIMA': 0.3, 'LSTM': 0.7}
+
+
 ticker = "AMZN"  # Stock ticker symbol
 
 # Get user inputs for start and end dates
@@ -45,27 +53,6 @@ end_date = input("Enter the end date (YYYY-MM-DD): ")
 ticker_data_filename = os.path.join("data", f"{ticker}_{date_now}.csv")
 model_name = f"{date_now}_{ticker}-sh-{int(SHUFFLE)}-sc-{int(SCALE)}-sbd-{int(SPLIT_BY_DATE)}-{LOSS}-{OPTIMIZER}-LSTM-seq-{N_STEPS}-step-{LOOKUP_STEP}"
 
-# Callback class for plotting training history
-class TrainingPlotCallback(tf.keras.callbacks.Callback):
-    def __init__(self):
-        super(TrainingPlotCallback, self).__init__()
-        self.history = {'loss': [], 'val_loss': []}  # Store loss and validation loss
-    
-    def on_epoch_end(self, epoch, logs=None):
-        # Update history with loss and validation loss for the current epoch
-        self.history['loss'].append(logs.get('loss'))
-        self.history['val_loss'].append(logs.get('val_loss'))
-        
-        # Plot the training and validation loss
-        plt.figure(figsize=(12, 6))
-        plt.plot(self.history['loss'], label='Training Loss')
-        plt.plot(self.history['val_loss'], label='Validation Loss')
-        plt.xlabel('Epoch')
-        plt.ylabel('Loss')
-        plt.title('Training and Validation Loss')
-        plt.legend()
-        plt.grid(True)
-        plt.show()
 
 # Function to shuffle two arrays in unison
 def shuffle_in_unison(a, b):
@@ -268,45 +255,127 @@ def get_final_df(test_df, scaler):
     })
     return pred_df
 
+
+#function for arima and ensemble
+def fit_arima_model(data):
+    model = ARIMA(data, order=ARIMA_ORDER)
+    results = model.fit()
+    return results
+
+def ensemble_predict(arima_pred, lstm_pred, weights):
+    return weights['ARIMA'] * arima_pred + weights['LSTM'] * lstm_pred
+
+class TrainingPlotCallback(tf.keras.callbacks.Callback):
+    def __init__(self):
+        super(TrainingPlotCallback, self).__init__()
+        self.history = {'loss': [], 'val_loss': []}
+    
+    def on_epoch_end(self, epoch, logs=None):
+        self.history['loss'].append(logs.get('loss'))
+        self.history['val_loss'].append(logs.get('val_loss'))
+        
+        if epoch % 50 == 0:  # Plot every 50 epochs
+            plt.figure(figsize=(10, 6))
+            plt.plot(self.history['loss'], label='Training Loss')
+            plt.plot(self.history['val_loss'], label='Validation Loss')
+            plt.xlabel('Epoch')
+            plt.ylabel('Loss')
+            plt.title('Training and Validation Loss')
+            plt.legend()
+            plt.grid(True)
+            plt.show()
+
+
 # Main function to run the process
 def main():
     # Load data
-    data = load_data(ticker, n_steps=N_STEPS, scale=SCALE, shuffle=SHUFFLE, lookup_step=LOOKUP_STEP, split_by_date=SPLIT_BY_DATE, test_size=TEST_SIZE, feature_columns=FEATURE_COLUMNS)
+    data = load_data(ticker, n_steps=N_STEPS, scale=SCALE, shuffle=SHUFFLE, 
+                     lookup_step=LOOKUP_STEP, split_by_date=SPLIT_BY_DATE, 
+                     test_size=TEST_SIZE, feature_columns=FEATURE_COLUMNS)
     
-    # Create and train models with different configurations
-    for config in model_configurations:
-        model = create_model(sequence_length=N_STEPS, n_features=len(FEATURE_COLUMNS), units=config["units"], cell=LSTM, n_layers=config["n_layers"], dropout=config["dropout"], loss=LOSS, optimizer=OPTIMIZER, bidirectional=config["bidirectional"])
-        print(model.summary())  # Print model summary
+    # Fit ARIMA model
+    arima_model = fit_arima_model(data['df']['adjclose'])
+    arima_forecast = arima_model.forecast(steps=len(data['y_test']))
 
-        # Train the model with the custom callback for plotting
-        history = model.fit(data["X_train"], data["y_train"], epochs=EPOCHS, batch_size=BATCH_SIZE, validation_data=(data["X_test"], data["y_test"]), verbose=1, callbacks=[TrainingPlotCallback()])
+    best_mae = float('inf')
+    best_model = None
+    best_config = None
+
+    for config in model_configurations:
+        model = create_model(sequence_length=N_STEPS, n_features=len(FEATURE_COLUMNS), 
+                             units=config["units"], cell=LSTM, n_layers=config["n_layers"], 
+                             dropout=config["dropout"], loss=LOSS, optimizer=OPTIMIZER, 
+                             bidirectional=config["bidirectional"])
+        
+        history = model.fit(data["X_train"], data["y_train"], 
+                            epochs=EPOCHS, batch_size=BATCH_SIZE,
+                            validation_data=(data["X_test"], data["y_test"]), 
+                            verbose=1, callbacks=[TrainingPlotCallback()])
 
         # Evaluate the model
-        scores = model.evaluate(data["X_test"], data["y_test"], verbose=1)
-        print(f"Model Evaluation Scores: {scores}")
+        _, mae = model.evaluate(data["X_test"], data["y_test"], verbose=0)
+        print(f"MAE: {mae:.4f} for config: {config}")
 
-        #making multistep predictions
-        last_sequence = data['last_sequence']
-        multistep_predictions = get_multistep_predictions(model, last_sequence, steps=LOOKUP_STEP, scaler=data["column_scaler"]["adjclose"])
-        
+        if mae < best_mae:
+            best_mae = mae
+            best_model = model
+            best_config = config
 
-        # Print confirmation of multistep predictions execution
-        print(f"Successfully executed multistep prediction for {LOOKUP_STEP} steps.")
-        print(f"Multistep predictions for the next {LOOKUP_STEP} days: {multistep_predictions}")
+    print(f"Best model configuration: {best_config}")
 
+    # Use the best model for predictions
+    lstm_predictions = best_model.predict(data["X_test"])
 
-        #prepare the final dataframe for plotting
-        pred_df = get_final_df(data['test_df'], data["column_scaler"]["adjclose"])
-        pred_df["multistep_predictions"] = np.nan
-        pred_df["multistep_predictions"].iloc[-len(mutltistep_predictions):] = multistep_predictions
+    # Inverse transform predictions if scaled
+    if SCALE:
+        lstm_predictions = data["column_scaler"]["adjclose"].inverse_transform(lstm_predictions)
+        y_test = data["column_scaler"]["adjclose"].inverse_transform(data["y_test"].reshape(-1, 1))
+    else:
+        y_test = data["y_test"]
 
-        #plotting the results
-        plot_graph(pred_df)
+    # Ensemble predictions
+    ensemble_predictions = ensemble_predict(arima_forecast, lstm_predictions.flatten(), ENSEMBLE_WEIGHTS)
 
-        # Optional: Plot candlestick and boxplot charts
-        plot_candlestick_chart(data['df'])
-        plot_boxplot_chart(data['df'])
+    # Prepare final DataFrame for plotting
+    pred_df = pd.DataFrame({
+        'true_adjclose': y_test.flatten(),
+        'lstm_pred': lstm_predictions.flatten(),
+        'arima_pred': arima_forecast,
+        'ensemble_pred': ensemble_predictions
+    })
 
-# Run the main function
+    # Plot results
+    plt.figure(figsize=(12, 6))
+    plt.plot(pred_df['true_adjclose'], label='True Prices')
+    plt.plot(pred_df['lstm_pred'], label='LSTM Predictions')
+    plt.plot(pred_df['arima_pred'], label='ARIMA Predictions')
+    plt.plot(pred_df['ensemble_pred'], label='Ensemble Predictions')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.title(f'{ticker} Stock Price Predictions')
+    plt.legend()
+    plt.show()
+
+    # Calculate and print performance metrics
+    for model in ['lstm_pred', 'arima_pred', 'ensemble_pred']:
+        mae = mean_absolute_error(pred_df['true_adjclose'], pred_df[model])
+        mse = mean_squared_error(pred_df['true_adjclose'], pred_df[model])
+        rmse = np.sqrt(mse)
+        print(f"{model} - MAE: {mae:.4f}, MSE: {mse:.4f}, RMSE: {rmse:.4f}")
+
+    # Multistep predictions
+    last_sequence = data['last_sequence'][-N_STEPS:]
+    lstm_multistep = get_multistep_predictions(best_model, last_sequence, LOOKUP_STEP, data["column_scaler"]["adjclose"])
+    arima_multistep = arima_model.forecast(steps=LOOKUP_STEP)
+    ensemble_multistep = ensemble_predict(arima_multistep, lstm_multistep, ENSEMBLE_WEIGHTS)
+
+    print(f"Multistep predictions for the next {LOOKUP_STEP} days:")
+    print(f"LSTM: {lstm_multistep}")
+    print(f"ARIMA: {arima_multistep}")
+    print(f"Ensemble: {ensemble_multistep}")
+
+    plot_candlestick_chart(data['df'])
+    plot_boxplot_chart(data['df'])
+
 if __name__ == "__main__":
     main()
