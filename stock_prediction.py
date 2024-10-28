@@ -162,6 +162,14 @@ def create_model(sequence_length, n_features, units=256, cell=LSTM, n_layers=2, 
     model.compile(loss=loss, metrics=["mean_absolute_error"], optimizer=optimizer)  # Compile the model
     return model
 
+# Multivariate Prediction Function
+def multivariate_prediction(data, k_days, sequence_length=N_STEPS, n_features=len(FEATURE_COLUMNS)):
+    X, y = [], []
+    for i in range(len(data) - sequence_length - k_days):
+        X.append(data[i:i + sequence_length])
+        y.append(data[i + sequence_length:i + sequence_length + k_days, 0])  # Assuming adjclose is first feature
+    return np.array(X), np.array(y)
+
 #Funtion to predict multiple future prices (multistep prediction)
 
 def get_multistep_predictions(model, last_sequence, steps, scaler):
